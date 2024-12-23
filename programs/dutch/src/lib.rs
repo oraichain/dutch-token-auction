@@ -19,6 +19,9 @@ use anchor_spl::{
     }
 };
 
+pub mod error;
+use crate::error::ErrorCode as CustomErrorCode;
+
 declare_id!("Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS");
 
 #[program]
@@ -36,13 +39,13 @@ pub mod dutch {
     ) -> Result<()> {
         // check that start time precedes end time
         if starting_time >= ending_time {
-            return Err(ErrorCode::InvalidDateRange.into());
+            return Err(CustomErrorCode::InvalidDateRange.into());
         }
 
         // check that the current time is now or in the future
         let current_time = Clock::get()?.unix_timestamp;
         if current_time > starting_time {
-            return Err(ErrorCode::InvalidStartDate.into());
+            return Err(CustomErrorCode::InvalidStartDate.into());
         }
 
         // set the auction account data
@@ -99,10 +102,10 @@ pub mod dutch {
 
         // check that the auction is in session
         if current_time < ctx.accounts.auction_account.starting_time {
-            return Err(ErrorCode::AuctionEarly.into());
+            return Err(CustomErrorCode::AuctionEarly.into());
         }
         if current_time > ctx.accounts.auction_account.ending_time {
-            return Err(ErrorCode::AuctionLate.into());
+            return Err(CustomErrorCode::AuctionLate.into());
         }
 
         let starting_price = ctx.accounts.auction_account.starting_price as f64;
@@ -183,7 +186,7 @@ pub struct CloseAuction<'info> {
     authority: Signer<'info>,
     #[account(
         mut,
-        constraint = authority.key() == auction_account.authority @ErrorCode::ProxyClose
+        constraint = authority.key() == auction_account.authority @CustomErrorCode::ProxyClose
     )]
     auction_account: Account<'info, AuctionAccount>,
     #[account(mut)]
@@ -203,7 +206,7 @@ pub struct Bid<'info> {
     auction_account: Account<'info, AuctionAccount>,
     #[account(
         mut,
-        constraint = escrow_token_account.key() == auction_account.escrow_account @ErrorCode::InvalidEscrow,
+        constraint = escrow_token_account.key() == auction_account.escrow_account @CustomErrorCode::InvalidEscrow,
     )]
     escrow_token_account: Account<'info, TokenAccount>,
     #[account(
@@ -215,7 +218,7 @@ pub struct Bid<'info> {
     bidder_token_account: Account<'info, TokenAccount>,
     #[account(
         mut,
-        constraint = auction_owner.key() == auction_account.authority.key() @ErrorCode::MismatchedOwners,
+        constraint = auction_owner.key() == auction_account.authority.key() @CustomErrorCode::MismatchedOwners,
     )]
     /// CHECK: Using the constraint above, we verify that the pubkey of this account matches the auction authority
     auction_owner: AccountInfo<'info>,
@@ -310,22 +313,4 @@ impl AuctionAccount {
         + TIMESTAMP_LENGTH      // starting time
         + TIMESTAMP_LENGTH      // ending time
         + U8_LENGTH;            // bump
-}
-
-#[error_code]
-pub enum ErrorCode {
-    #[msg("Close auction can only be called by the auction authority")]
-    ProxyClose,
-    #[msg("Auction has not yet begun")]
-    AuctionEarly,
-    #[msg("Auction has concluded")]
-    AuctionLate,
-    #[msg("Start date must occur before end date")]
-    InvalidDateRange,
-    #[msg("Start date must occur in the future")]
-    InvalidStartDate,
-    #[msg("Auction owner must match auction authority")]
-    MismatchedOwners,
-    #[msg("Incorrect escrow token account")]
-    InvalidEscrow,
 }

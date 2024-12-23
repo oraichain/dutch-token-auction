@@ -1,6 +1,6 @@
-import * as anchor from "@project-serum/anchor";
+import * as anchor from "@coral-xyz/anchor";
 import * as spl from "@solana/spl-token";
-import { Program } from "@project-serum/anchor";
+import { BN, Program } from "@coral-xyz/anchor";
 import { Dutch } from "../target/types/dutch";
 import { PublicKey, LAMPORTS_PER_SOL } from "@solana/web3.js";
 import assert from "assert";
@@ -120,7 +120,7 @@ describe("dutch", () => {
         new anchor.BN(1), // 1 token
         auctionAccountPDABump
       )
-      .accounts({
+      .accountsStrict({
         authority: wallet1.publicKey,
         auctionAccount: auctionAccountPDA,
         escrowTokenAccount: escrowTokenAccount.address,
@@ -197,7 +197,7 @@ describe("dutch", () => {
 
     await program.methods
       .closeAuction()
-      .accounts({
+      .accountsStrict({
         authority: wallet1.publicKey,
         auctionAccount: auctionAccountPDA,
         holderTokenAccount: wallet1TokenAccount.address,
@@ -239,7 +239,9 @@ describe("dutch", () => {
       assert(false, "Account does exist");
     } catch (e) {
       assert(
-        e.message === "Account does not exist " + auctionAccountPDA.toBase58()
+        e.message ===
+          "Account does not exist or has no data " +
+            auctionAccountPDA.toBase58()
       );
     }
   });
@@ -264,7 +266,7 @@ describe("dutch", () => {
         new anchor.BN(1), // 1 token
         auctionAccountPDABump
       )
-      .accounts({
+      .accountsStrict({
         authority: wallet1.publicKey,
         auctionAccount: auctionAccountPDA,
         escrowTokenAccount: escrowTokenAccount,
@@ -291,12 +293,38 @@ describe("dutch", () => {
     const balance2Before = await program.provider.connection.getBalance(
       wallet2.publicKey
     );
+
+    // case 1: unauthorized
+    try {
+      await program.methods
+        .bid()
+        .accountsStrict({
+          authority: wallet2.publicKey,
+          auctionAccount: auctionAccountPDA,
+          escrowTokenAccount: escrowTokenAccount,
+          bidderTokenAccount: bidderTokenAccount.address,
+          auctionOwner: wallet2.publicKey, // passing themselves in as the recipient
+          mint: mint,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+          systemProgram: SYSTEM_PROGRAM_ID,
+          rent: SYSVAR_RENT_PUBKEY,
+        })
+        .signers([wallet2])
+        .rpc({ commitment: "confirmed" });
+      assert(false, "Successfully bid");
+    } catch (e) {
+      assert(
+        e.message.indexOf("Auction owner must match auction authority") != -1
+      );
+    }
+
     const wait = 15;
     await delay(wait * 1000);
 
     await program.methods
       .bid()
-      .accounts({
+      .accountsStrict({
         authority: wallet2.publicKey,
         auctionAccount: auctionAccountPDA,
         escrowTokenAccount: escrowTokenAccount,
@@ -381,7 +409,9 @@ describe("dutch", () => {
       assert(false, "Account does exist");
     } catch (e) {
       assert(
-        e.message === "Account does not exist " + auctionAccountPDA.toBase58()
+        e.message ===
+          "Account does not exist or has no data " +
+            auctionAccountPDA.toBase58()
       );
     }
   });
@@ -406,7 +436,7 @@ describe("dutch", () => {
         new anchor.BN(1), // 1 token
         auctionAccountPDABump
       )
-      .accounts({
+      .accountsStrict({
         authority: wallet1.publicKey,
         auctionAccount: auctionAccountPDA,
         escrowTokenAccount: escrowTokenAccount,
@@ -431,7 +461,7 @@ describe("dutch", () => {
     try {
       await program.methods
         .bid()
-        .accounts({
+        .accountsStrict({
           authority: wallet2.publicKey,
           auctionAccount: auctionAccountPDA,
           escrowTokenAccount: escrowTokenAccount,
@@ -453,7 +483,7 @@ describe("dutch", () => {
     // close auction for posterity
     await program.methods
       .closeAuction()
-      .accounts({
+      .accountsStrict({
         authority: wallet1.publicKey,
         auctionAccount: auctionAccountPDA,
         holderTokenAccount: wallet1TokenAccount.address,
@@ -484,7 +514,7 @@ describe("dutch", () => {
         new anchor.BN(1),
         auctionAccountPDABump
       )
-      .accounts({
+      .accountsStrict({
         authority: wallet1.publicKey,
         auctionAccount: auctionAccountPDA,
         escrowTokenAccount: escrowTokenAccount,
@@ -505,13 +535,13 @@ describe("dutch", () => {
       wallet2.publicKey
     );
 
-    await delay(2500); // wait 1.5 seconds - slightly more than the duration of the auction
+    await delay(3000); // wait 1.5 seconds - slightly more than the duration of the auction
 
     // attempt to bid on the auction after it has ended
     try {
       await program.methods
         .bid()
-        .accounts({
+        .accountsStrict({
           authority: wallet2.publicKey,
           auctionAccount: auctionAccountPDA,
           escrowTokenAccount: escrowTokenAccount,
@@ -533,7 +563,7 @@ describe("dutch", () => {
     // close auction for posterity
     await program.methods
       .closeAuction()
-      .accounts({
+      .accountsStrict({
         authority: wallet1.publicKey,
         auctionAccount: auctionAccountPDA,
         holderTokenAccount: wallet1TokenAccount.address,
@@ -565,7 +595,7 @@ describe("dutch", () => {
           new anchor.BN(1),
           auctionAccountPDABump
         )
-        .accounts({
+        .accountsStrict({
           authority: wallet1.publicKey,
           auctionAccount: auctionAccountPDA,
           escrowTokenAccount: escrowTokenAccount,
@@ -606,7 +636,7 @@ describe("dutch", () => {
           new anchor.BN(1),
           auctionAccountPDABump
         )
-        .accounts({
+        .accountsStrict({
           authority: wallet1.publicKey,
           auctionAccount: auctionAccountPDA,
           escrowTokenAccount: escrowTokenAccount,
@@ -645,7 +675,7 @@ describe("dutch", () => {
         new anchor.BN(1),
         auctionAccountPDABump
       )
-      .accounts({
+      .accountsStrict({
         authority: wallet1.publicKey,
         auctionAccount: auctionAccountPDA,
         escrowTokenAccount: escrowTokenAccount,
@@ -662,8 +692,8 @@ describe("dutch", () => {
     try {
       await program.methods
         .closeAuction()
-        .accounts({
-          authority: wallet2.publicKey,   // wallet2 attempting to close wallet1's auction
+        .accountsStrict({
+          authority: wallet2.publicKey, // wallet2 attempting to close wallet1's auction
           auctionAccount: auctionAccountPDA,
           holderTokenAccount: wallet1TokenAccount.address,
           escrowTokenAccount: escrowTokenAccount,
@@ -684,7 +714,7 @@ describe("dutch", () => {
     // close auction for posterity
     await program.methods
       .closeAuction()
-      .accounts({
+      .accountsStrict({
         authority: wallet1.publicKey,
         auctionAccount: auctionAccountPDA,
         holderTokenAccount: wallet1TokenAccount.address,
@@ -693,67 +723,5 @@ describe("dutch", () => {
       })
       .signers([wallet1])
       .rpc({ commitment: "confirmed" });
-  });
-
-  it("Must pass auction owner into bid", async () => {
-    const [auctionAccountPDA, auctionAccountPDABump] =
-      await deriveAuctionAccountPDA(wallet1.publicKey);
-    const escrowTokenAccount = await getAssociatedTokenAddress(
-      mint,
-      auctionAccountPDA,
-      true
-    );
-
-    const currentTime = Math.round(Date.now() / 1000);
-    await program.methods
-      .initializeAuction(
-        new anchor.BN(currentTime),
-        new anchor.BN(currentTime + 3600),
-        1 * LAMPORTS_PER_SOL,
-        new anchor.BN(1),
-        auctionAccountPDABump
-      )
-      .accounts({
-        authority: wallet1.publicKey,
-        auctionAccount: auctionAccountPDA,
-        escrowTokenAccount: escrowTokenAccount,
-        holderTokenAccount: wallet1TokenAccount.address,
-        mint: mint,
-        tokenProgram: TOKEN_PROGRAM_ID,
-        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-        systemProgram: SYSTEM_PROGRAM_ID,
-        rent: SYSVAR_RENT_PUBKEY,
-      })
-      .signers([wallet1])
-      .rpc({ commitment: "confirmed" });
-
-      const bidderTokenAccount = await spl.getOrCreateAssociatedTokenAccount(
-        program.provider.connection,
-        wallet2,
-        mint,
-        wallet2.publicKey
-      );
-
-      try {
-        await program.methods
-          .bid()
-          .accounts({
-            authority: wallet2.publicKey,
-            auctionAccount: auctionAccountPDA,
-            escrowTokenAccount: escrowTokenAccount,
-            bidderTokenAccount: bidderTokenAccount.address,
-            auctionOwner: wallet2.publicKey,    // passing themselves in as the recipient
-            mint: mint,
-            tokenProgram: TOKEN_PROGRAM_ID,
-            associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-            systemProgram: SYSTEM_PROGRAM_ID,
-            rent: SYSVAR_RENT_PUBKEY,
-          })
-          .signers([wallet2])
-          .rpc({ commitment: "confirmed" });
-        assert(false, "Successfully bid");
-      } catch (e) {
-        assert(e.message.indexOf("Auction owner must match auction authority") != -1);
-      }
   });
 });
