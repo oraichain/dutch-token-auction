@@ -20,24 +20,33 @@ use anchor_spl::{
 };
 
 pub mod error;
-use crate::error::ErrorCode as CustomErrorCode;
+pub mod instructions;
+pub use instructions::*;
+pub mod constants;
+pub use constants::*;
+pub mod state;
+pub use state::*;
+use crate::error::CustomErrorCode;
 
 declare_id!("77p3Ka2WQ7a9zDS8CAE9r8ELLN5UtWidTMnd4PAnzmoM");
 
 #[program]
 pub mod dutch {
+    use std::borrow::BorrowMut;
+
     use super::*;
 
     // initialize an auction
     pub fn initialize_auction(
         ctx: Context<InitializeAuction>, 
         starting_time: i64, 
-        ending_time: i64, 
+        auction_period: i64, 
         start_price: u32,
         amount: u64,
         bump: u8,
     ) -> Result<()> {
         // check that start time precedes end time
+        let ending_time = starting_time + auction_period;
         if starting_time >= ending_time {
             return Err(CustomErrorCode::InvalidDateRange.into());
         }
@@ -46,23 +55,44 @@ pub mod dutch {
         let current_time = Clock::get()?.unix_timestamp;
         if current_time > starting_time {
             return Err(CustomErrorCode::InvalidStartDate.into());
+        };
+
+        let escrow_account = &ctx.accounts.escrow_token_account;
+        if escrow_account.amount <= 0 {
+            return Err(CustomErrorCode::AuctionInvalid.into());
+        }
+
+        if amount == 0 {
+            return Err(CustomErrorCode::InvalidEscrowAmount.into());
         }
 
         // set the auction account data
+        let auction_config = &mut ctx.accounts.auction_config;
         let auction_account: &mut Account<AuctionAccount> = &mut ctx.accounts.auction_account; 
+
+        let current_auction_start = auction_config.next_auction_start;
+
+        // cannot create round id current_auction_start > timestamp
+        if current_auction_start > current_time {
+            return err!(CustomErrorCode::PreviousRoundNotEnd);
+        }
+        if auction_account.current_auction_slot_count > 0 {
+            return err!(CustomErrorCode::PreviousRoundNotEnd);
+        }
+
+        // prevent auction snipes and bots
+        auction_config.next_auction_start = current_time + auction_config.interval_seconds as i64;
+            
         auction_account.authority = ctx.accounts.authority.key().clone();
         auction_account.escrow_account = ctx.accounts.escrow_token_account.key();
         auction_account.starting_price = start_price;
         auction_account.starting_time = starting_time;
-        auction_account.ending_time = ending_time;
-        auction_account.amount = amount;
+        auction_account.current_auction_slot_count = auction_config.max_auction_slots;
+        
+        // auction period can be much longer than the next auction round to reduce the price
+        auction_account.auction_period = auction_period;
+        auction_account.amount = amount.min(escrow_account.amount);
         auction_account.bump = bump;
-
-        // transfer token(s) from the owner to the auction-owned token account
-        transfer(
-            ctx.accounts.into_transfer_ctx(),
-            amount
-        )?;
 
         Ok(())
     }
@@ -71,7 +101,7 @@ pub mod dutch {
     pub fn close_auction(
         ctx: Context<CloseAuction>,
     ) -> Result<()> {
-        // transfer the token(s) to the owner
+        // transfer the remaining token(s) from escrow account to the owner
         let transfer_ctx = ctx.accounts.clone();
         let authority_key = ctx.accounts.authority.key();
         transfer(
@@ -97,81 +127,97 @@ pub mod dutch {
     pub fn bid(
         ctx: Context<Bid>,
     ) -> Result<()> {
+
+        // TODO: add bidder details so when users want to sell during curve -> can refund them
+
         // compute the current price based on the time
         let current_time = Clock::get()?.unix_timestamp;
+        let transfer_ctx = ctx.accounts.borrow_mut();
+        let ending_time = transfer_ctx.auction_account.starting_time + transfer_ctx.auction_account.auction_period;
 
         // check that the auction is in session
-        if current_time < ctx.accounts.auction_account.starting_time {
+        if current_time < transfer_ctx.auction_account.starting_time {
             return Err(CustomErrorCode::AuctionEarly.into());
         }
-        if current_time > ctx.accounts.auction_account.ending_time {
+        if current_time > ending_time {
+            return Err(CustomErrorCode::AuctionLate.into());
+        }
+        if transfer_ctx.auction_account.current_auction_slot_count == 0 {
             return Err(CustomErrorCode::AuctionLate.into());
         }
 
-        let starting_price = ctx.accounts.auction_account.starting_price as f64;
-        let elapsed_time = (current_time - ctx.accounts.auction_account.starting_time) as f64;
-        let duration = (ctx.accounts.auction_account.ending_time - ctx.accounts.auction_account.starting_time) as f64;
+        let starting_price = transfer_ctx.auction_account.starting_price as f64;
+        let elapsed_time = (current_time - transfer_ctx.auction_account.starting_time) as f64;
+        let duration = (ending_time - transfer_ctx.auction_account.starting_time) as f64;
         let price = starting_price - ((elapsed_time * starting_price) / duration);
 
-        // transfer lamports to the owner
+        // transfer lamports to the global vault
         invoke(
             &system_instruction::transfer(
-                &ctx.accounts.authority.key(),
-                &ctx.accounts.auction_account.authority.key(),
+                &transfer_ctx.authority.key(),
+                &transfer_ctx.global_vault.key(),
                 price as u64,
             ),
             &[
-                ctx.accounts.authority.to_account_info().clone(),
-                ctx.accounts.auction_owner.clone(),
-                ctx.accounts.system_program.to_account_info().clone(),
+                transfer_ctx.authority.to_account_info(),
+                transfer_ctx.global_vault.to_account_info(),
+                transfer_ctx.system_program.to_account_info(),
             ],
         )?;
 
         // transfer the token to the bidder
-        let authority_key = ctx.accounts.auction_account.authority.key();
-        let transfer_ctx = ctx.accounts.clone();
         transfer(
             transfer_ctx.into_transfer_ctx()
-            .with_signer(&[&[authority_key.as_ref(), &[ctx.accounts.auction_account.bump]]]), 
-            ctx.accounts.auction_account.amount
+            .with_signer(&[&[constants::AUCTION, transfer_ctx.auction_config.key().as_ref(), &[transfer_ctx.auction_account.bump]]]), 
+            transfer_ctx.auction_account.amount
         )?;
 
-        // close token account
-        let close_token_ctx = ctx.accounts.clone();
-        close_token_account(
-            close_token_ctx.into_close_account_ctx()
-            .with_signer(&[&[authority_key.as_ref(), &[ctx.accounts.auction_account.bump]]]),
-        )?;
+        // reset start and end time after each bid
+        transfer_ctx.auction_account.starting_time = current_time;
+        // reduce an auction slot
+        transfer_ctx.auction_account.current_auction_slot_count -= 1;
 
-        // close auction account
-        ctx.accounts.auction_account.close(ctx.accounts.authority.to_account_info())?;
+        // don't close any account, let the owner close at will
 
         Ok(())
     }
 }
 
 #[derive(Accounts)]
-#[instruction(starting_time: i64, ending_time: i64, start_price: u32, amount: u32, bump: u8,)]
+#[instruction(starting_time: i64, ending_time: i64, start_price: u32, amount: u32, bump: u8)]
 pub struct InitializeAuction<'info> {
-    #[account(mut)]
-    authority: Signer<'info>,
+    #[account(mut, constraint = auction_config.moderator == moderator.key() @CustomErrorCode::IncorrectAuthority)]
+    moderator: Signer<'info>,
+
+    #[account(mut, constraint = auction_config.authority == authority.key() @CustomErrorCode::IncorrectAuthority)]
+    authority: UncheckedAccount<'info>,
+
     #[account(
-        init, 
+        seeds = [
+            constants::CONFIG,
+            auction_config.authority.as_ref(),
+            mint.key().as_ref(),
+        ],
+        bump,
+        has_one = authority,
+    )]
+    pub auction_config: Box<Account<'info, AuctionConfig>>,
+
+    #[account(
+        init_if_needed, 
         payer = authority, 
-        seeds = [authority.key().as_ref()],
+        seeds = [constants::AUCTION, auction_config.key().as_ref()],
         bump,
         space = AuctionAccount::LEN
     )]
     auction_account: Account<'info, AuctionAccount>,
     #[account(
         init_if_needed,
-        payer = authority,
+        payer = moderator,
         associated_token::mint = mint,
         associated_token::authority = auction_account,
     )]
-    escrow_token_account: Account<'info, TokenAccount>,
-    #[account(mut)]
-    holder_token_account: Account<'info, TokenAccount>,
+    escrow_token_account: Box<Account<'info, TokenAccount>>,
     #[account(mut)]
     mint: Account<'info, Mint>,
     token_program: Program<'info, Token>,
@@ -184,15 +230,31 @@ pub struct InitializeAuction<'info> {
 pub struct CloseAuction<'info> {
     #[account(mut)]
     authority: Signer<'info>,
+
     #[account(
-        mut,
-        constraint = authority.key() == auction_account.authority @CustomErrorCode::ProxyClose
+        seeds = [
+            constants::CONFIG,
+            auction_config.authority.as_ref(),
+            mint.key().as_ref(),
+        ],
+        bump,
+        constraint = auction_config.authority == authority.key() @CustomErrorCode::IncorrectAuthority
+    )]
+    pub auction_config: Box<Account<'info, AuctionConfig>>,
+
+    #[account(
+        mut, 
+        seeds = [constants::AUCTION, auction_config.key().as_ref()],
+        bump,
+        constraint = authority.key() == auction_account.authority @CustomErrorCode::IncorrectAuthority
     )]
     auction_account: Account<'info, AuctionAccount>,
+
     #[account(mut)]
-    holder_token_account: Account<'info, TokenAccount>,
+    holder_token_account: Box<Account<'info, TokenAccount>>,
     #[account(mut)]
-    escrow_token_account: Account<'info, TokenAccount>,
+    escrow_token_account: Box<Account<'info, TokenAccount>>,
+    mint: Account<'info, Mint>,
     token_program: Program<'info, Token>,
 }
 
@@ -202,8 +264,27 @@ pub struct Bid<'info> {
         mut,
     )]
     authority: Signer<'info>,
-    #[account(mut)]
+
+    #[account(mut, constraint = auction_config.authority == authority.key() @CustomErrorCode::IncorrectAuthority)]
+    pub config_authority: UncheckedAccount<'info>,
+
+    #[account(
+        seeds = [
+            constants::CONFIG,
+            auction_config.authority.as_ref(),
+            mint.key().as_ref(),
+        ],
+        bump,
+    )]
+    pub auction_config: Box<Account<'info, AuctionConfig>>,
+
+    #[account(
+        mut, 
+        seeds = [constants::AUCTION, auction_config.key().as_ref()],
+        bump,
+    )]
     auction_account: Account<'info, AuctionAccount>,
+
     #[account(
         mut,
         constraint = escrow_token_account.key() == auction_account.escrow_account @CustomErrorCode::InvalidEscrow,
@@ -216,29 +297,18 @@ pub struct Bid<'info> {
         associated_token::authority = authority,
     )]
     bidder_token_account: Account<'info, TokenAccount>,
+    
+    /// CHECK: Using the constraint above, we verify that the pubkey of this account matches the auction authority
     #[account(
         mut,
-        constraint = auction_owner.key() == auction_account.authority.key() @CustomErrorCode::MismatchedOwners,
+        constraint = auction_config.global_vault.key() == global_vault.key() @CustomErrorCode::MismatchedGlobalVault,
     )]
-    /// CHECK: Using the constraint above, we verify that the pubkey of this account matches the auction authority
-    auction_owner: AccountInfo<'info>,
+    global_vault: UncheckedAccount<'info>,
     mint: Account<'info, Mint>,
     token_program: Program<'info, Token>,
     associated_token_program: Program<'info, AssociatedToken>,
     system_program: Program<'info, System>,
     rent: Sysvar<'info, Rent>,
-}
-
-impl<'info> InitializeAuction<'info> {
-    fn into_transfer_ctx(&self) -> CpiContext<'_, '_, '_, 'info, Transfer<'info>> {
-        let cpi_program = self.token_program.to_account_info();
-        let cpi_accounts = Transfer {
-            authority: self.authority.to_account_info(),
-            from: self.holder_token_account.to_account_info(),
-            to: self.escrow_token_account.to_account_info(),
-        };
-        CpiContext::new(cpi_program, cpi_accounts)
-    }
 }
 
 impl<'info> CloseAuction<'info> {
@@ -273,27 +343,18 @@ impl<'info> Bid<'info> {
         };
         CpiContext::new(cpi_program, cpi_accounts)
     }
-
-    fn into_close_account_ctx(&self) -> CpiContext<'_, '_, '_, 'info, CloseTokenAccount<'info>> {
-        let cpi_program = self.token_program.to_account_info();
-        let cpi_accounts = CloseTokenAccount {
-            account: self.escrow_token_account.to_account_info(),
-            authority: self.auction_account.to_account_info(),
-            destination: self.auction_owner.to_account_info(),
-        };
-        CpiContext::new(cpi_program, cpi_accounts)
-    }
 }
 
 #[account]
 pub struct AuctionAccount {
+    bump: u8,
     authority: Pubkey,
     amount: u64,
     escrow_account: Pubkey,
     starting_price: u32,
     starting_time: i64,
-    ending_time: i64,
-    bump: u8,
+    auction_period: i64,
+    current_auction_slot_count: u32,
 }
 
 const DISCRIMINATOR_LENGTH: usize = 8;
@@ -305,12 +366,13 @@ const U64_LENGTH: usize = 8;
 
 impl AuctionAccount {
     const LEN: usize = 
-        DISCRIMINATOR_LENGTH    // discriminator
-        + PUBLIC_KEY_LENGTH     // authority
+    DISCRIMINATOR_LENGTH        // discriminator
+        + U8_LENGTH             // bump
         + PUBLIC_KEY_LENGTH     // authority
         + U64_LENGTH            // amount
+        + PUBLIC_KEY_LENGTH     // escrow account
         + U32_LENGTH            // starting price
         + TIMESTAMP_LENGTH      // starting time
-        + TIMESTAMP_LENGTH      // ending time
-        + U8_LENGTH;            // bump
+        + TIMESTAMP_LENGTH      // auction period
+        + U32_LENGTH;           // current_auction_slot_count
 }
