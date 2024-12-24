@@ -18,7 +18,6 @@ pub struct CreateAuctionConfig<'info> {
         seeds = [
             constants::CONFIG,
             authority.key().as_ref(),
-            moderator.key().as_ref(),
             currency_mint.key().as_ref(),
         ],
         bump,

@@ -37,11 +37,10 @@ pub struct AuctionConfig {
 
 impl AuctionConfig {
     /// Seeds are unique to authority/pyth feed/currency mint combinations
-    pub fn auth_seeds<'a>(&'a self) -> [&'a [u8]; 5] {
+    pub fn auth_seeds<'a>(&'a self) -> [&'a [u8]; 4] {
         [
             constants::CONFIG.as_ref(),
             self.authority.as_ref(),
-            self.moderator.as_ref(),
             self.currency_mint.as_ref(),
             self.bump.as_ref(),
         ]
